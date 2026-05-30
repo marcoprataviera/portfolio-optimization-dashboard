@@ -6,7 +6,7 @@ The application allows users to construct and analyze custom multi-asset portfol
 
 ## Live Demo
 
-https://your-streamlit-link.streamlit.app
+https://portfolio-optimization-dashboard-kebr6naz98vgknpamsbg69.streamlit.app/
 
 ## Dashboard Preview
 
