@@ -4,6 +4,24 @@ Interactive portfolio optimization and risk analytics dashboard built in Python 
 
 The application allows users to construct and analyze custom multi-asset portfolios with benchmark comparison, risk diagnostics, constrained optimization, and execution-aware allocation modeling.
 
+## Live Demo
+
+https://your-streamlit-link.streamlit.app
+
+## Dashboard Preview
+
+### Portfolio Performance
+![Portfolio Performance](preview.png)
+
+### Efficient Frontier Optimization
+![Optimization](optimizer.png)
+
+### Execution-Aware Allocation
+![Allocation](allocation.png)
+
+### Risk & Portfolio Analytics
+![Risk Analytics](risk.png)
+
  ## Features
 
  - Dynamic ticker inputs and portfolio weights
