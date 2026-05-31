@@ -1014,57 +1014,6 @@ def stop_with_error(message):
     raise DashboardHaltError(message)
 
 
-def initialize_session_state():
-    for ticker in TICKER_UNIVERSE:
-        default_weight = 100.0 / len(DEFAULT_STOCKS) if ticker in DEFAULT_STOCKS else 0.0
-        st.session_state.setdefault(f"weight_{ticker}", default_weight)
-
-    st.session_state.setdefault("selected_tickers", DEFAULT_STOCKS.copy())
-    st.session_state.setdefault("benchmark_col", DEFAULT_BENCHMARK)
-    st.session_state.setdefault("rebalance_frequency", DEFAULT_REBALANCE)
-    st.session_state.setdefault("investment_amount", 100000.0)
-    st.session_state.setdefault("whole_shares_only", True)
-    st.session_state.setdefault("transaction_cost_bps", 10.0)
-    st.session_state.setdefault("normalize_weights", True)
-    st.session_state.setdefault("fill_drawdown", True)
-    st.session_state.setdefault("single_stock_cap_pct", DEFAULT_SINGLE_NAME_CAP_PCT)
-    st.session_state.setdefault("year_range", None)
-
-
-def set_equal_weight_selection(selected_tickers):
-    if not selected_tickers:
-        return
-    equal_weight = 100.0 / len(selected_tickers)
-    for ticker in TICKER_UNIVERSE:
-        st.session_state[f"weight_{ticker}"] = equal_weight if ticker in selected_tickers else 0.0
-
-
-def add_ticker_to_selection():
-    current = list(st.session_state.get("selected_tickers", DEFAULT_STOCKS.copy()))
-    if len(current) >= MAX_SELECTED_TICKERS:
-        return
-
-    available = [ticker for ticker in TICKER_UNIVERSE if ticker not in current]
-    if available:
-        current.append(available[0])
-        st.session_state["selected_tickers"] = current
-        st.session_state.setdefault(f"weight_{available[0]}", 0.0)
-
-
-def remove_ticker_from_selection():
-    current = list(st.session_state.get("selected_tickers", DEFAULT_STOCKS.copy()))
-    if len(current) > MIN_SELECTED_TICKERS:
-        current.pop()
-        st.session_state["selected_tickers"] = current
-
-
-def randomize_five_tickers():
-    rng = np.random.default_rng()
-    selection = list(rng.choice(TICKER_UNIVERSE, size=RANDOM_SELECTION_COUNT, replace=False))
-    st.session_state["selected_tickers"] = selection
-    set_equal_weight_selection(selection)
-
-
 def section_header(title, subtitle):
     st.markdown(
         f"""
@@ -1103,6 +1052,99 @@ def source_caption(text):
     )
 
 
+def set_equal_weight_selection(selected_tickers):
+    if not selected_tickers:
+        return
+    equal_weight = 100.0 / len(selected_tickers)
+    for ticker in selected_tickers:
+        st.session_state[f"weight_{ticker}"] = equal_weight
+
+
+def _clean_ticker_value(ticker_value):
+    return ticker_value.strip().upper().replace(" ", "")
+
+
+def get_ticker_input_values():
+    ticker_count = max(1, int(st.session_state.get("ticker_input_count", len(DEFAULT_STOCKS))))
+    return [
+        st.session_state.get(f"ticker_input_{idx}", "")
+        for idx in range(ticker_count)
+    ]
+
+
+def set_ticker_input_values(ticker_values):
+    updated_values = list(ticker_values)[:MAX_SELECTED_TICKERS]
+    if not updated_values:
+        updated_values = [DEFAULT_STOCKS[0]]
+
+    old_count = int(st.session_state.get("ticker_input_count", 0))
+    st.session_state["ticker_input_count"] = len(updated_values)
+
+    for idx, ticker_value in enumerate(updated_values):
+        st.session_state[f"ticker_input_{idx}"] = ticker_value
+
+    for idx in range(len(updated_values), old_count):
+        st.session_state.pop(f"ticker_input_{idx}", None)
+
+
+def sanitize_ticker_inputs(ticker_values, max_count=MAX_SELECTED_TICKERS):
+    cleaned = [_clean_ticker_value(ticker_value) for ticker_value in ticker_values]
+    active = [ticker for ticker in cleaned if ticker]
+
+    duplicates = sorted({ticker for ticker in active if active.count(ticker) > 1})
+    if duplicates:
+        raise ValueError("Tickers must be unique. Duplicate(s): " + ", ".join(duplicates))
+
+    if len(active) > max_count:
+        raise ValueError(f"Select no more than {max_count} tickers.")
+
+    return active
+
+
+def add_ticker_input_row():
+    current = get_ticker_input_values()
+    if len(current) >= MAX_SELECTED_TICKERS:
+        return
+
+    current.append("")
+    set_ticker_input_values(current)
+
+
+def remove_ticker_input_row(row_index):
+    current = get_ticker_input_values()
+    if row_index <= 0 or row_index >= len(current):
+        return
+
+    updated = current[:row_index] + current[row_index + 1:]
+    set_ticker_input_values(updated)
+
+
+def randomize_five_tickers():
+    rng = np.random.default_rng()
+    selection = list(rng.choice(TICKER_UNIVERSE, size=RANDOM_SELECTION_COUNT, replace=False))
+    set_ticker_input_values(selection)
+    set_equal_weight_selection(selection)
+
+
+def initialize_session_state():
+    for ticker in TICKER_UNIVERSE:
+        default_weight = 100.0 / len(DEFAULT_STOCKS) if ticker in DEFAULT_STOCKS else 0.0
+        st.session_state.setdefault(f"weight_{ticker}", default_weight)
+
+    st.session_state.setdefault("ticker_input_count", len(DEFAULT_STOCKS))
+    for idx, ticker in enumerate(DEFAULT_STOCKS):
+        st.session_state.setdefault(f"ticker_input_{idx}", ticker)
+    st.session_state.setdefault("benchmark_col", DEFAULT_BENCHMARK)
+    st.session_state.setdefault("rebalance_frequency", DEFAULT_REBALANCE)
+    st.session_state.setdefault("investment_amount", 100000.0)
+    st.session_state.setdefault("whole_shares_only", True)
+    st.session_state.setdefault("transaction_cost_bps", 10.0)
+    st.session_state.setdefault("normalize_weights", True)
+    st.session_state.setdefault("fill_drawdown", True)
+    st.session_state.setdefault("single_stock_cap_pct", DEFAULT_SINGLE_NAME_CAP_PCT)
+    st.session_state.setdefault("year_range", None)
+
+
 def render_dataframe(df, height=None, max_rows_visible=None):
     if height is None:
         visible_rows = len(df) if max_rows_visible is None else min(len(df), max_rows_visible)
@@ -1120,11 +1162,11 @@ def render_dataframe(df, height=None, max_rows_visible=None):
 def render_chart(fig, width_mode="standard"):
     st.markdown("<div class='chart-spacer'></div>", unsafe_allow_html=True)
     if width_mode == "full":
-        _, center, _ = st.columns([0.02, 0.96, 0.02])
+        left, center, right = st.columns([0.02, 0.96, 0.02])
     elif width_mode == "narrow":
-        _, center, _ = st.columns([0.17, 0.66, 0.17])
+        left, center, right = st.columns([0.17, 0.66, 0.17])
     else:
-        _, center, _ = st.columns([0.06, 0.88, 0.06])
+        left, center, right = st.columns([0.06, 0.88, 0.06])
 
     with center:
         st.pyplot(fig, use_container_width=True)
@@ -1601,47 +1643,58 @@ def main():
 
     with st.sidebar.expander("Universe & Weights", expanded=True):
         st.markdown(
-            "<div class='sidebar-note'>Select between 2 and 20 tickers, add or remove names dynamically, or randomize a five-stock starting basket from a diversified universe.</div>",
+            "<div class='sidebar-note'>Type ticker symbols directly, add rows as needed, or randomize a five-stock starting basket from a diversified universe.</div>",
             unsafe_allow_html=True,
         )
 
-        add_col, remove_col, random_col, equal_col = st.columns(4, gap="small")
-        with add_col:
-            if st.button("+ Add", key="add_ticker_btn", use_container_width=True):
-                add_ticker_to_selection()
+        ticker_values = get_ticker_input_values()
+        for idx in range(len(ticker_values)):
+            input_col, remove_col = st.columns([0.82, 0.18], gap="small")
+            with input_col:
+                st.text_input(
+                    f"Ticker {idx + 1}",
+                    key=f"ticker_input_{idx}",
+                    placeholder="e.g. AAPL",
+                )
+            if idx > 0:
+                with remove_col:
+                    st.markdown("<div style='height: 1.9rem;'></div>", unsafe_allow_html=True)
+                    if st.button("-", key=f"remove_ticker_row_{idx}", use_container_width=True):
+                        remove_ticker_input_row(idx)
+                        st.rerun()
+
+        if len(ticker_values) < MAX_SELECTED_TICKERS:
+            if st.button("+ Add Ticker", key="add_ticker_row_btn", use_container_width=True):
+                add_ticker_input_row()
                 st.rerun()
-        with remove_col:
-            if st.button("- Remove", key="remove_ticker_btn", use_container_width=True):
-                remove_ticker_from_selection()
-                st.rerun()
+
+        random_col, equal_col = st.columns(2, gap="small")
         with random_col:
             if st.button("Randomize 5 Tickers", key="randomize_btn", use_container_width=True):
                 randomize_five_tickers()
                 st.rerun()
         with equal_col:
             if st.button("Equal Weight", key="equal_weight_btn", use_container_width=True):
-                set_equal_weight_selection(st.session_state["selected_tickers"])
+                try:
+                    set_equal_weight_selection(sanitize_ticker_inputs(get_ticker_input_values()))
+                except ValueError as exc:
+                    stop_with_error(str(exc))
                 st.rerun()
 
-        st.multiselect(
-            "Selected Tickers",
-            options=TICKER_UNIVERSE,
-            key="selected_tickers",
-            max_selections=MAX_SELECTED_TICKERS,
-        )
-
-        st.markdown(
-            f"<div class='sidebar-note'>Selected tickers: {len(st.session_state['selected_tickers'])} / {MAX_SELECTED_TICKERS}</div>",
-            unsafe_allow_html=True,
-        )
-
+        current_ticker_values = get_ticker_input_values()
         try:
-            stocks = sanitize_tickers(st.session_state["selected_tickers"])
+            stocks = sanitize_ticker_inputs(current_ticker_values)
         except ValueError as exc:
             stop_with_error(str(exc))
 
+        st.markdown(
+            f"<div class='sidebar-note'>Filled tickers: {len(stocks)} / {MAX_SELECTED_TICKERS}</div>",
+            unsafe_allow_html=True,
+        )
+
         raw_weighting = {}
         for ticker in stocks:
+            st.session_state.setdefault(f"weight_{ticker}", 100.0 / max(len(stocks), 1))
             raw_weighting[ticker] = st.slider(
                 f"{ticker} Weight (%)",
                 min_value=0.0,
@@ -1649,6 +1702,10 @@ def main():
                 step=1.0,
                 key=f"weight_{ticker}",
             )
+
+        if len(stocks) < MIN_SELECTED_TICKERS:
+            st.info(f"Add at least {MIN_SELECTED_TICKERS} filled ticker boxes to run the dashboard.")
+            st.stop()
 
     with spinner_context("Loading price history for the selected universe..."):
         try:
