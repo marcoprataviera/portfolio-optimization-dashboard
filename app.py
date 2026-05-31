@@ -5,13 +5,21 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import matplotlib.dates as mdates
+from contextlib import nullcontext
 
-DEFAULT_STOCKS = ["XEQT.TO", "NVDA", "AAPL", "MSFT", "VFV.TO"]
-NUM_SLOTS = len(DEFAULT_STOCKS)
+DEFAULT_STOCKS = ["AAPL", "MSFT", "NVDA", "JPM", "XOM"]
+TICKER_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
+    "JPM", "V", "MA", "UNH", "JNJ", "PG", "KO", "COST",
+    "XOM", "CVX", "CAT", "NEE", "SPY",
+]
+MIN_SELECTED_TICKERS = 2
+MAX_SELECTED_TICKERS = 20
+RANDOM_SELECTION_COUNT = 5
 
 TRADING_DAYS = 252
 ROLLING_WINDOW = 63
-MIN_WEIGHT_PCT = 5.0
+MIN_WEIGHT_PCT = 0.0
 MAX_WEIGHT_PCT = 40.0
 DEFAULT_SINGLE_NAME_CAP_PCT = 40.0
 DEFAULT_BENCHMARK = "SPY"
@@ -288,10 +296,7 @@ def _validate_constraint_bounds(num_assets, min_weight, max_weight):
         raise ValueError("Maximum weight constraint is infeasible for the number of assets.")
 
 
-def generate_constrained_weights(num_assets, min_weight=MIN_WEIGHT_PCT / 100, max_weight=MAX_WEIGHT_PCT / 100, rng=None):
-    _validate_constraint_bounds(num_assets, min_weight, max_weight)
-    rng = np.random.default_rng() if rng is None else rng
-
+def _generate_feasible_weight_vector(num_assets, min_weight, max_weight, rng):
     constrained_weights = np.full(num_assets, min_weight, dtype=float)
     remaining = 1.0 - constrained_weights.sum()
     if np.isclose(remaining, 0):
@@ -310,6 +315,23 @@ def generate_constrained_weights(num_assets, min_weight=MIN_WEIGHT_PCT / 100, ma
         remaining -= extra
 
     constrained_weights[draw_order[-1]] += remaining
+    return constrained_weights
+
+
+def generate_constrained_weights(num_assets, min_weight=MIN_WEIGHT_PCT / 100, max_weight=MAX_WEIGHT_PCT / 100, rng=None):
+    _validate_constraint_bounds(num_assets, min_weight, max_weight)
+    rng = np.random.default_rng() if rng is None else rng
+
+    if np.isclose(min_weight, 0):
+        min_active_assets = int(np.ceil(1.0 / max_weight - 1e-12))
+        min_active_assets = max(1, min_active_assets)
+        active_assets = int(rng.integers(min_active_assets, num_assets + 1))
+        active_idx = rng.choice(num_assets, size=active_assets, replace=False)
+        active_weights = _generate_feasible_weight_vector(active_assets, 0.0, max_weight, rng)
+        constrained_weights = np.zeros(num_assets, dtype=float)
+        constrained_weights[active_idx] = active_weights
+    else:
+        constrained_weights = _generate_feasible_weight_vector(num_assets, min_weight, max_weight, rng)
 
     if (
         np.any(constrained_weights < min_weight - 1e-10)
@@ -348,15 +370,20 @@ def validate_weighting(weighting, min_weight_pct=MIN_WEIGHT_PCT, single_stock_ca
     return len(violations) == 0, " | ".join(violations)
 
 
-def sanitize_tickers(ticker_values):
+def sanitize_tickers(ticker_values, min_count=MIN_SELECTED_TICKERS, max_count=MAX_SELECTED_TICKERS):
     cleaned = [ticker.strip().upper().replace(" ", "") for ticker in ticker_values]
 
     if any(not ticker for ticker in cleaned):
-        raise ValueError("All five ticker slots need a symbol.")
+        raise ValueError("All selected ticker slots need a symbol.")
 
     duplicates = sorted({ticker for ticker in cleaned if cleaned.count(ticker) > 1})
     if duplicates:
         raise ValueError("Tickers must be unique. Duplicate(s): " + ", ".join(duplicates))
+
+    if len(cleaned) < min_count:
+        raise ValueError(f"Select at least {min_count} tickers.")
+    if len(cleaned) > max_count:
+        raise ValueError(f"Select no more than {max_count} tickers.")
 
     return cleaned
 
@@ -960,16 +987,39 @@ def build_strategy_comparison_table(
     return pd.DataFrame(rows)
 
 
+class DashboardHaltError(RuntimeError):
+    """Raised when the dashboard should stop cleanly after showing an error."""
+
+
+def _has_streamlit_context():
+    try:
+        from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
+    except Exception:
+        try:
+            from streamlit.runtime.scriptrunner.script_run_context import get_script_run_ctx
+        except Exception:
+            return False
+
+    return get_script_run_ctx() is not None
+
+
+def spinner_context(text):
+    return st.spinner(text) if _has_streamlit_context() else nullcontext()
+
+
 def stop_with_error(message):
-    st.error(message)
-    st.stop()
+    if _has_streamlit_context():
+        st.error(message)
+        st.stop()
+    raise DashboardHaltError(message)
 
 
 def initialize_session_state():
-    for idx, ticker in enumerate(DEFAULT_STOCKS, start=1):
-        st.session_state.setdefault(f"ticker_{idx}", ticker)
-        st.session_state.setdefault(f"weight_{idx}", 100.0 / NUM_SLOTS)
+    for ticker in TICKER_UNIVERSE:
+        default_weight = 100.0 / len(DEFAULT_STOCKS) if ticker in DEFAULT_STOCKS else 0.0
+        st.session_state.setdefault(f"weight_{ticker}", default_weight)
 
+    st.session_state.setdefault("selected_tickers", DEFAULT_STOCKS.copy())
     st.session_state.setdefault("benchmark_col", DEFAULT_BENCHMARK)
     st.session_state.setdefault("rebalance_frequency", DEFAULT_REBALANCE)
     st.session_state.setdefault("investment_amount", 100000.0)
@@ -979,6 +1029,40 @@ def initialize_session_state():
     st.session_state.setdefault("fill_drawdown", True)
     st.session_state.setdefault("single_stock_cap_pct", DEFAULT_SINGLE_NAME_CAP_PCT)
     st.session_state.setdefault("year_range", None)
+
+
+def set_equal_weight_selection(selected_tickers):
+    if not selected_tickers:
+        return
+    equal_weight = 100.0 / len(selected_tickers)
+    for ticker in TICKER_UNIVERSE:
+        st.session_state[f"weight_{ticker}"] = equal_weight if ticker in selected_tickers else 0.0
+
+
+def add_ticker_to_selection():
+    current = list(st.session_state.get("selected_tickers", DEFAULT_STOCKS.copy()))
+    if len(current) >= MAX_SELECTED_TICKERS:
+        return
+
+    available = [ticker for ticker in TICKER_UNIVERSE if ticker not in current]
+    if available:
+        current.append(available[0])
+        st.session_state["selected_tickers"] = current
+        st.session_state.setdefault(f"weight_{available[0]}", 0.0)
+
+
+def remove_ticker_from_selection():
+    current = list(st.session_state.get("selected_tickers", DEFAULT_STOCKS.copy()))
+    if len(current) > MIN_SELECTED_TICKERS:
+        current.pop()
+        st.session_state["selected_tickers"] = current
+
+
+def randomize_five_tickers():
+    rng = np.random.default_rng()
+    selection = list(rng.choice(TICKER_UNIVERSE, size=RANDOM_SELECTION_COUNT, replace=False))
+    st.session_state["selected_tickers"] = selection
+    set_equal_weight_selection(selection)
 
 
 def section_header(title, subtitle):
@@ -1036,11 +1120,11 @@ def render_dataframe(df, height=None, max_rows_visible=None):
 def render_chart(fig, width_mode="standard"):
     st.markdown("<div class='chart-spacer'></div>", unsafe_allow_html=True)
     if width_mode == "full":
-        left, center, right = st.columns([0.02, 0.96, 0.02])
+        _, center, _ = st.columns([0.02, 0.96, 0.02])
     elif width_mode == "narrow":
-        left, center, right = st.columns([0.17, 0.66, 0.17])
+        _, center, _ = st.columns([0.17, 0.66, 0.17])
     else:
-        left, center, right = st.columns([0.06, 0.88, 0.06])
+        _, center, _ = st.columns([0.06, 0.88, 0.06])
 
     with center:
         st.pyplot(fig, use_container_width=True)
@@ -1517,41 +1601,56 @@ def main():
 
     with st.sidebar.expander("Universe & Weights", expanded=True):
         st.markdown(
-            "<div class='sidebar-note'>Define the five-asset universe and set portfolio weights. Use the equal-weight shortcut to reset the current mix.</div>",
+            "<div class='sidebar-note'>Select between 2 and 20 tickers, add or remove names dynamically, or randomize a five-stock starting basket from a diversified universe.</div>",
             unsafe_allow_html=True,
         )
 
-        ticker_values = []
-        for idx in range(1, NUM_SLOTS + 1):
-            ticker_values.append(
-                st.text_input(
-                    f"Ticker {idx}",
-                    key=f"ticker_{idx}",
-                )
-            )
+        add_col, remove_col, random_col, equal_col = st.columns(4, gap="small")
+        with add_col:
+            if st.button("+ Add", key="add_ticker_btn", use_container_width=True):
+                add_ticker_to_selection()
+                st.rerun()
+        with remove_col:
+            if st.button("- Remove", key="remove_ticker_btn", use_container_width=True):
+                remove_ticker_from_selection()
+                st.rerun()
+        with random_col:
+            if st.button("Randomize 5 Tickers", key="randomize_btn", use_container_width=True):
+                randomize_five_tickers()
+                st.rerun()
+        with equal_col:
+            if st.button("Equal Weight", key="equal_weight_btn", use_container_width=True):
+                set_equal_weight_selection(st.session_state["selected_tickers"])
+                st.rerun()
 
-        if st.button("Equal Weight", use_container_width=True):
-            equal_weight = 100.0 / NUM_SLOTS
-            for idx in range(1, NUM_SLOTS + 1):
-                st.session_state[f"weight_{idx}"] = equal_weight
-            st.rerun()
+        st.multiselect(
+            "Selected Tickers",
+            options=TICKER_UNIVERSE,
+            key="selected_tickers",
+            max_selections=MAX_SELECTED_TICKERS,
+        )
+
+        st.markdown(
+            f"<div class='sidebar-note'>Selected tickers: {len(st.session_state['selected_tickers'])} / {MAX_SELECTED_TICKERS}</div>",
+            unsafe_allow_html=True,
+        )
 
         try:
-            stocks = sanitize_tickers(ticker_values)
+            stocks = sanitize_tickers(st.session_state["selected_tickers"])
         except ValueError as exc:
             stop_with_error(str(exc))
 
         raw_weighting = {}
-        for idx, ticker in enumerate(stocks, start=1):
+        for ticker in stocks:
             raw_weighting[ticker] = st.slider(
                 f"{ticker} Weight (%)",
                 min_value=0.0,
                 max_value=100.0,
                 step=1.0,
-                key=f"weight_{idx}",
+                key=f"weight_{ticker}",
             )
 
-    with st.spinner("Loading price history for the selected universe..."):
+    with spinner_context("Loading price history for the selected universe..."):
         try:
             price_history_df = get_price_history_cached(stocks, price_col="Close")
         except ValueError as exc:
@@ -1607,6 +1706,7 @@ def main():
             key="fill_drawdown",
         )
 
+    cap_floor_pct = float(max(100 / len(stocks), MIN_WEIGHT_PCT))
     with st.sidebar.expander("Execution & Constraints", expanded=True):
         st.markdown(
             "<div class='sidebar-note'>Set the capital base, share rounding, trading-cost assumptions, and institutional concentration limits.</div>",
@@ -1633,12 +1733,29 @@ def main():
             key="transaction_cost_bps",
         )
 
-        single_stock_cap_pct = st.slider(
-            "Single-Stock Cap (%)",
-            min_value=float(max(100 / NUM_SLOTS, MIN_WEIGHT_PCT)),
-            max_value=float(MAX_WEIGHT_PCT),
-            step=1.0,
-            key="single_stock_cap_pct",
+        if cap_floor_pct > MAX_WEIGHT_PCT:
+            st.markdown(
+                "<div class='sidebar-note'>The current ticker count makes the single-stock cap infeasible. Add more tickers or relax the cap assumptions.</div>",
+                unsafe_allow_html=True,
+            )
+            single_stock_cap_pct = cap_floor_pct
+        else:
+            st.session_state["single_stock_cap_pct"] = min(
+                max(st.session_state["single_stock_cap_pct"], cap_floor_pct),
+                MAX_WEIGHT_PCT,
+            )
+            single_stock_cap_pct = st.slider(
+                "Single-Stock Cap (%)",
+                min_value=cap_floor_pct,
+                max_value=float(MAX_WEIGHT_PCT),
+                step=1.0,
+                key="single_stock_cap_pct",
+            )
+
+    if cap_floor_pct > MAX_WEIGHT_PCT:
+        minimum_feasible_tickers = int(np.ceil(100 / MAX_WEIGHT_PCT))
+        stop_with_error(
+            f"Infeasible constraints: with {len(stocks)} tickers and a {MAX_WEIGHT_PCT:.0f}% maximum single-stock cap, the portfolio cannot sum to 100%. Add at least {minimum_feasible_tickers} tickers."
         )
 
     if investment_amount <= 0:
@@ -1648,8 +1765,8 @@ def main():
         stop_with_error("Transaction cost bps must be 0 or greater.")
 
     total_weight = sum(raw_weighting.values())
-    if total_weight == 0:
-        stop_with_error("Set at least one weight above 0.")
+    if np.isclose(total_weight, 0):
+        stop_with_error("All weights are 0. Assign at least one ticker a positive weight.")
 
     if normalize_weights:
         try:
@@ -1672,7 +1789,7 @@ def main():
     start_date = pd.Timestamp(f"{year_range[0]}-01-01")
     end_date = pd.Timestamp(f"{year_range[1]}-12-31")
 
-    with st.spinner("Running portfolio analytics..."):
+    with spinner_context("Running portfolio analytics..."):
         selected_price_df = price_history_df[
             (price_history_df["Date"] >= start_date) &
             (price_history_df["Date"] <= end_date)
@@ -1813,10 +1930,10 @@ def main():
     effective_max_pct = _effective_max_weight_pct(single_stock_cap_pct)
 
     summary_band(
-        f"<strong>Current Allocation:</strong> {allocation_caption} &nbsp;&nbsp;•&nbsp;&nbsp; "
-        f"<strong>Benchmark:</strong> {benchmark_col} &nbsp;&nbsp;•&nbsp;&nbsp; "
-        f"<strong>Rebalance:</strong> {rebalance_frequency} &nbsp;&nbsp;•&nbsp;&nbsp; "
-        f"<strong>Capital:</strong> {_fmt_currency(investment_amount)} &nbsp;&nbsp;•&nbsp;&nbsp; "
+        f"<strong>Current Allocation:</strong> {allocation_caption} &nbsp;&nbsp;&bull;&nbsp;&nbsp; "
+        f"<strong>Benchmark:</strong> {benchmark_col} &nbsp;&nbsp;&bull;&nbsp;&nbsp; "
+        f"<strong>Rebalance:</strong> {rebalance_frequency} &nbsp;&nbsp;&bull;&nbsp;&nbsp; "
+        f"<strong>Capital:</strong> {_fmt_currency(investment_amount)} &nbsp;&nbsp;&bull;&nbsp;&nbsp; "
         f"<strong>Single-Name Cap:</strong> {effective_max_pct:.0f}%"
     )
 
@@ -1855,7 +1972,7 @@ def main():
         f"Investment amount {_fmt_currency(investment_amount)} | Gross invested {_fmt_currency(allocation_summary['gross_invested'])} | "
         f"Transaction costs {_fmt_currency(allocation_summary['transaction_cost'])} | Leftover cash {_fmt_currency(allocation_summary['leftover_cash'])}"
     )
-    render_dataframe(format_allocation_table(allocation_df), max_rows_visible=7)
+    render_dataframe(format_allocation_table(allocation_df), max_rows_visible=min(len(allocation_df), 12))
     small_note("This table includes share rounding and entry costs. Backtests and optimizer outputs below still use frictionless target weights.")
 
     st.markdown("#### Performance Metrics")
@@ -1948,4 +2065,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except DashboardHaltError as exc:
+        if _has_streamlit_context():
+            raise
+        print(f"Dashboard error: {exc}")
